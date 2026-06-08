@@ -247,6 +247,7 @@ You have the following built-in skill prompts, located in the `built-in-skills/`
 - **[Speaker notes](built-in-skills/speaker-notes.md)** — Presenter script alongside visual-first slides
 - **[Export as PPTX (editable)](built-in-skills/export-as-pptx-editable.md)** — Native text & shapes — editable in PowerPoint
 - **[Export as PPTX (screenshots)](built-in-skills/export-as-pptx-screenshots.md)** — Flat images — pixel-perfect but not editable
+- **[Design system authoring](built-in-skills/design-system-authoring-guide.md)** — Set up or import a design system (full flow + portable compiler & read-only checker)
 - **[Create design system](built-in-skills/create-design-system.md)** — Skill to use if user asks you to create a design system or UI kit
 - **[Design Components](built-in-skills/design-components.md)** — Author streamable .dc.html Design Components
 - **[Save as PDF](built-in-skills/save-as-pdf.md)** — Print-ready PDF export

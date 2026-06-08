@@ -58,3 +58,23 @@ For thorough or directed checks ("screenshot and check the spacing"), spawn an `
 - The screenshot surface desyncs after an in-page `location.reload()` or repeated custom resizes (the window renders tiny in a corner). Resync via `preview_resize` to a preset then back to your size; prefer `location.href = …` over `reload()`.
 
 **If the preview MCP is unavailable,** fall back by file type. A fully self-contained single file can be opened with `open <path>` (`file://`); a multi-file prototype (`<script src="…jsx">`) will NOT load over `file://` and needs HTTP — start the `designs` server yourself (`python3 -m http.server 4311 --directory designs`) and open the URL, or spawn an `Agent` to verify. Never leave the user on a view that silently failed to load its components.
+
+## Design-system compiler & checker (read-only)
+
+Only relevant when **authoring a design system** (see [`built-in-skills/design-system-authoring-guide.md`](../built-in-skills/design-system-authoring-guide.md)). The web product's automatic compiler and `check_design_system` tool don't exist here; two portable `node` scripts in `agents/` replace them.
+
+- **Compiler** (write step) — a plain `Bash` call, identical on every harness. After editing components/tokens/cards, regenerate the artifacts:
+
+  ```
+  node <skill>/agents/compile-design-system.mjs designs/<project>
+  ```
+
+  It writes `_ds_bundle.js`, `_ds_manifest.json`, `_adherence.oxlintrc.json`. Run it yourself; nothing runs automatically.
+
+- **Checker** (read-only) — writes nothing, so run it inline with `Bash` whenever you want a quick report:
+
+  ```
+  node <skill>/agents/check-design-system.mjs designs/<project>
+  ```
+
+  To run it as an **isolated read-only subagent** after a batch of edits, spawn an `Agent` (any read-capable subagent type, e.g. `Explore` or `general-purpose`) with the prompt in [`../agents/design-system-checker.md`](../agents/design-system-checker.md), passing it the project directory and this skill's `agents/` path. The subagent only runs the checker and relays its output — it must not edit files or call the compiler. Use a subagent to keep the report out of your own context; otherwise the inline `Bash` call is fine.
