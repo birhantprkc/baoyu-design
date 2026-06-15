@@ -239,7 +239,7 @@
       gap: 6px;
       color: rgba(255,255,255,0.72);
     }
-    .btn.reset .kbd {
+    .btn .kbd {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -253,6 +253,10 @@
       background: rgba(255,255,255,0.12);
       border-radius: 4px;
     }
+    .btn.fs { padding: 0 8px; gap: 6px; }
+    .btn.fs .fs-exit { display: none; }
+    :host([data-fullscreen]) .btn.fs .fs-enter { display: none; }
+    :host([data-fullscreen]) .btn.fs .fs-exit { display: block; }
 
     .count {
       font-variant-numeric: tabular-nums;
@@ -636,6 +640,11 @@
       // doesn't clobber _presenting when both paths are in play.
       this._onFsChange = () => {
         this._fullscreen = !!document.fullscreenElement;
+        this.toggleAttribute('data-fullscreen', this._fullscreen);
+        if (this._fsBtn) {
+          this._fsBtn.setAttribute('aria-label', this._fullscreen ? 'Exit fullscreen' : 'Enter fullscreen');
+          this._fsBtn.setAttribute('title', this._fullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)');
+        }
         this._syncRailHidden();
         this._fit();
         this._scaleThumbs();
@@ -914,11 +923,17 @@
         </button>
         <span class="divider"></span>
         <button class="btn reset" type="button" aria-label="Reset to first slide" title="Reset (R)">Reset<span class="kbd">R</span></button>
+        <button class="btn fs" type="button" aria-label="Enter fullscreen" title="Fullscreen (F)">
+          <svg class="fs-enter" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>
+          <svg class="fs-exit" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4"/></svg>
+          <span class="kbd">F</span>
+        </button>
       `;
 
       overlay.querySelector('.prev').addEventListener('click', () => this._advance(-1, 'click'));
       overlay.querySelector('.next').addEventListener('click', () => this._advance(1, 'click'));
       overlay.querySelector('.reset').addEventListener('click', () => this._go(0, 'click'));
+      overlay.querySelector('.fs').addEventListener('click', () => this._toggleFullscreen());
 
       // Thumbnail rail + context menu. Thumbnails are populated in
       // _renderRail() after _collectSlides().
@@ -1026,6 +1041,7 @@
       this._confirm = confirm;
       this._countEl = overlay.querySelector('.current');
       this._totalEl = overlay.querySelector('.total');
+      this._fsBtn = overlay.querySelector('.fs');
 
       // Restore persisted rail width.
       let rw = 188;
@@ -1403,6 +1419,8 @@
         this._go(this._slides.length - 1, 'keyboard');
       } else if (key === 'r' || key === 'R') {
         this._go(0, 'keyboard');
+      } else if (key === 'f' || key === 'F') {
+        this._toggleFullscreen();
       } else if (/^[0-9]$/.test(key)) {
         // 1..9 jump to that slide; 0 jumps to 10.
         const n = key === '0' ? 9 : parseInt(key, 10) - 1;
@@ -1439,6 +1457,22 @@
       }
       if (i < 0 || i >= this._slides.length) { this._flashOverlay(); return; }
       this._go(i, reason);
+    }
+
+    /** Toggle native fullscreen on the whole document. Must be called from a
+     *  user gesture (button click or keydown) or requestFullscreen rejects.
+     *  The fullscreenchange handler hides the rail and swaps the button icon.
+     *  Standard API only — F11 / webkit-prefixed flows are out of scope,
+     *  matching the fullscreenchange listener in connectedCallback. */
+    _toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) {
+          if (document.exitFullscreen) document.exitFullscreen();
+        } else if (document.documentElement.requestFullscreen) {
+          const p = document.documentElement.requestFullscreen();
+          if (p && p.catch) p.catch(() => {});
+        }
+      } catch (e) {}
     }
 
     // ── Thumbnail rail ────────────────────────────────────────────────────
