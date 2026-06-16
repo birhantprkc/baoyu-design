@@ -210,6 +210,39 @@ python3 -m http.server 4311 --directory designs
 
 ---
 
+## 幻灯片与 PPTX 导出
+
+让它做一套幻灯片，产出方式和别的交付物一样 —— 一个**自包含的 HTML 网页**，用 `deck-stage` 组件和**制作演示文稿**子技能搭建。因为幻灯片本身就是一个网页，整个编辑回路都发生在你已经在用的环境里：
+
+- **用「指」来预览和修改。** 在 Agent 的网页预览里（Cursor Browser、Codex Browser 或 Claude Preview）打开幻灯片，点选某个标题或图表、说出想改成什么 —— 或者直接在聊天里说 —— Agent 就会去改这一页的源码。
+- **全屏放映。** 按 **`F`** 键（或点击幻灯片工具栏里的全屏按钮）即可全屏放映，缩略图侧栏会自动隐藏。`Cmd/Ctrl+F` 不受影响，浏览器自带的查找照常可用。
+
+幻灯片做好后，**在同一个会话里说一声就能导出成 PowerPoint** —— 「导出 PPTX」「export to PowerPoint」「做个 PPT」都会触发导出流程（它只导出本技能生成的幻灯片，而非任意 HTML 页面）。两种模式：
+
+- **可编辑（editable）** —— 原生的 PowerPoint 文字、形状和图片，可以在 PowerPoint 或 Keynote 里继续编辑，排版与网页上的效果高度一致。
+- **截图（screenshots）** —— 每页一张整版 PNG：像素级还原，但不可编辑。
+
+> **本地运行说明：** 在 `claude.ai/design` 上，导出 PPTX 用的是内置的 `gen_pptx` 工具 —— 当你把技能放到自己的 Agent 上跑时，这个工具并不存在。所以技能自带了一份本地 CLI（`agents/gen-pptx/`），用 Playwright 驱动无头 Chromium，再用 PptxGenJS 写出 `.pptx`。在 Claude Code 里，首次使用前需要构建一次（`cd skills/baoyu-design/agents/gen-pptx && npm install && npx playwright install chromium && npm run build`），之后 Agent 会自动起服务并调用这个 CLI 帮你完成导出。
+
+### gen_pptx 的工作原理
+
+核心思路：**不去解析 HTML，而是在真实浏览器里渲染它，再把渲染结果翻译成 PowerPoint。**
+
+<p align="center"><img src="assets/gen-pptx-pipeline-zh.svg" alt="gen_pptx 导出流水线" width="680"></p>
+
+CLI 通过 Playwright 启动一个无头 Chromium，把幻灯片当作真网页加载（所以需要 `http://` URL，`file://` 不行）。一段捕获代码被注入页面、挂载为 `window.__genpptx`，Node 驱动端通过 `page.evaluate()` 与之通信 —— 所有依赖真实浏览器的工作（布局、计算样式、字体度量、图片解码）都在页面内完成，只把纯数据递回 Node。
+
+在开始捕获之前，`setup()` 会藏掉导航条等 UI 元素、做字体替换（注入 `@font-face` 规则或从 Google Fonts 拉取）、清除 `transform: scale()` 缩放包装以确保测量值反映设计尺寸、等待 `document.fonts.ready`、并收集演讲者备注。
+
+然后逐页处理 —— `showJs` 翻到每一页，延迟等过渡动画落定，对所有图片调用 `.decode()` 确认解码完成。接下来两种模式走不同的路：
+
+- **截图模式**直接调用 `page.screenshot()`（`deviceScaleFactor: 2` 出高清），一页一张整版 PNG 贴进幻灯片。像素级还原，但在 PPT 里是一张平面图，改不了字。
+- **可编辑模式**递归遍历活的 DOM，把每个元素序列化为 `{ tag, rect, style, children }` 的 JSON 树，文本用 `Range.getBoundingClientRect()` 拿到精确行盒。回到 Node 后，`renderNodeToPptx` 把每个节点翻译成 PptxGenJS 的原生对象：背景和边框 → `addShape`，文字 → `addText`（字体、字号、颜色全部取自计算样式），图片（含栅格化的 SVG 和 canvas 快照）→ `addImage`。坐标换算：`px ÷ 96 = 英寸`、字号换算：`px × 0.75 = 磅`。
+
+最后做一轮校验：对相邻页做 djb2 哈希判断翻页是否生效、检查幻灯片尺寸是否匹配、核对演讲者备注数量 —— 结果以单行 JSON 打印，供 Agent 读取判断。
+
+---
+
 ## 示例 Prompt
 
 - *「用这张截图里的品牌风格，设计 3 个高保真的定价页方案。」*

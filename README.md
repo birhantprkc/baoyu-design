@@ -209,6 +209,39 @@ Anything imported as a design system compiles into a single self‑contained, in
 
 ---
 
+## Decks & PPTX export
+
+Ask for a slide deck and the skill builds it the same way it builds everything else — as a **self‑contained HTML page**, using the `deck-stage` component and the *Make a deck* built‑in skill. Because the deck is just a web page, the whole editing loop stays where you already are:
+
+- **Preview and tweak by pointing.** Open the deck in your agent's browser preview (Cursor Browser, Codex Browser, or Claude Preview), point at a headline or a chart and say what to change — or just ask in chat — and the agent edits that slide's source.
+- **Present full‑screen.** Press **`F`** (or click the fullscreen button in the deck toolbar) to present the deck full‑screen, with the thumbnail rail hidden. `Cmd/Ctrl+F` is left untouched, so the browser's Find still works.
+
+When the deck is ready, **export it to PowerPoint by saying so in the same conversation** — "export this to PPTX", "export to PowerPoint", or "做个 PPT" all route to the export flow (it only exports decks this skill builds, not arbitrary HTML). Two modes:
+
+- **Editable** — native PowerPoint text, shapes, and images you can keep editing in PowerPoint or Keynote, laid out to closely match the web deck.
+- **Screenshots** — one full‑bleed PNG per slide: pixel‑perfect, but flat.
+
+> **Running locally:** on `claude.ai/design`, PPTX export is a built‑in `gen_pptx` tool — and that tool isn't there when you run the skill on your own agent. So the skill ships its own: a local CLI (`agents/gen-pptx/`) that drives headless Chromium via Playwright and writes the `.pptx` with PptxGenJS. In Claude Code it runs after a one‑time build (`cd skills/baoyu-design/agents/gen-pptx && npm install && npx playwright install chromium && npm run build`); from then on the agent serves the deck and invokes the CLI for you.
+
+### How gen_pptx works
+
+The core idea: **don't parse HTML — render it in a real browser, then translate the result into PowerPoint**.
+
+<p align="center"><img src="assets/gen-pptx-pipeline.svg" alt="gen_pptx export pipeline" width="680"></p>
+
+The CLI launches a headless Chromium via Playwright and loads the deck as a live web page (which is why it needs an `http://` URL, not `file://`). A capture bundle is injected into the page and exposed as `window.__genpptx`; the Node driver talks to it through `page.evaluate()` — everything that needs the real browser (layout, computed styles, font metrics, image decoding) runs in‑page and returns pure data to Node.
+
+Before any slides are captured, `setup()` hides UI chrome, applies font substitutions (injecting `@font-face` rules or fetching from Google Fonts), undoes `transform: scale()` wrappers so measurements reflect authored dimensions, waits for `document.fonts.ready`, and collects speaker notes.
+
+Then slides are processed one by one — `showJs` navigates to each slide, a delay lets transitions settle, and images are `.decode()`'d. From here the two modes diverge:
+
+- **Screenshot mode** simply calls `page.screenshot()` at 2× device scale and drops each PNG as a full‑bleed slide image. Pixel‑perfect, but flat.
+- **Editable mode** recursively walks the live DOM, serializing every element into a `{ tag, rect, style, children }` JSON tree with pixel‑precise bounding boxes (text uses `Range.getBoundingClientRect()`). Back in Node, `renderNodeToPptx` translates each node into native PptxGenJS objects: backgrounds and borders become `addShape`, text becomes `addText` with the exact font/size/color from computed styles, images (including rasterized SVGs and canvas snapshots) become `addImage`. Coordinates convert at `px ÷ 96 = inches`, font sizes at `px × 0.75 = points`.
+
+Finally, a validation pass compares captures against the input — djb2‑hashing consecutive slides to flag navigation failures, checking slide dimensions, and verifying speaker‑note counts — and the result is printed as a single JSON line for the agent to read.
+
+---
+
 ## Example prompts
 
 - *"Design 3 hi‑fi variations of a pricing page using the brand in this screenshot."*
