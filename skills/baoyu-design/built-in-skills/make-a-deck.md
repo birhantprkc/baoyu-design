@@ -61,13 +61,22 @@ Author the slide in its **final visible layout** — the CSS you write is the fi
 | `appear` / `disappear` | Appear / Disappear | entrance / exit | — (instant; duration ignored) |
 | `fade-in` / `fade-out` | Fade | entrance / exit | — |
 | `fly-in` / `fly-out` | Fly In / Fly Out | entrance / exit | `data-anim-dir` |
-| `wipe-in` | Wipe | entrance | `data-anim-dir` |
+| `wipe-in` / `wipe-out` | Wipe | entrance / exit | `data-anim-dir` |
+| `float-in` / `float-out` | Float In / Float Out | entrance / exit | `data-anim-dir` (`top`/`bottom` only) |
+| `split-in` / `split-out` | Split | entrance / exit | `data-anim-dir` (`horizontal`/`vertical`; default `vertical`) |
+| `bounce-in` / `bounce-out` | Bounce | entrance / exit | — |
 | `zoom-in` / `zoom-out` | Zoom | entrance / exit | — |
+| `wheel-in` / `wheel-out` | Wheel | entrance / exit | — |
+| `random-bars-in` / `random-bars-out` | Random Bars | entrance / exit | `data-anim-dir` (`horizontal`/`vertical`; default `horizontal`) |
 | `spin` | Spin | emphasis | `data-anim-rotate` (degrees; default `360`, negative = counter-clockwise) |
 | `grow` / `shrink` | Grow/Shrink | emphasis | `data-anim-scale` (default `1.5` / `0.67`) |
+| `pulse` | Pulse | emphasis | `data-anim-scale` (peak; default `1.05`) |
+| `teeter` | Teeter | emphasis | `data-anim-rotate` (peak tilt in degrees; default `5`) |
 | `path` | Custom motion path | motion path | `data-anim-path` (required) |
 
-`data-anim-dir`: `left` / `right` / `top` / `bottom` (default `bottom`) — the edge the element flies in from, out to, or wipes from.
+`data-anim-dir` comes in three families. Fly and wipe take `left` / `right` / `top` / `bottom` (default `bottom`) — the edge the element enters from or exits toward. Float takes `top` / `bottom` only (default `bottom`: rises in from below, sinks away below). Split and random-bars take `horizontal` / `vertical` — the axis of the seam/bars (split defaults to `vertical`, PowerPoint's "Vertical In"; random-bars to `horizontal`). Values outside an effect's family fall back to its default.
+
+In the browser preview, wheel, split, and random-bars are gradient-mask approximations of PowerPoint's filters (exact in the exported file); don't put them on an element that already uses CSS `mask`/`mask-image` — the build would override it. On browsers without `CSS.registerProperty` these three preview as plain fades; the export is unaffected.
 
 `data-anim-path` is a small SVG-path subset in slide px, as offsets from the element's resting position (+y is down): an optional leading `M x y` (the path is rebased to start at 0,0), then `L x y` and `C x1 y1 x2 y2 x y` segments, comma- or whitespace-separated, up to 32 points. `data-anim-path="L 240 0"` moves the element 240px right; `data-anim-path="C 100 -200 300 -200 400 0"` arcs it up and over.
 
@@ -77,10 +86,14 @@ Author the slide in its **final visible layout** — the CSS you write is the fi
 |---|---|---|
 | `data-anim-trigger` | `click` / `with` / `after` | `after` |
 | `data-anim-delay` | ms, integer | `0` |
-| `data-anim-duration` | ms, integer | `500` for fade/fly/wipe/zoom; `2000` for spin/grow/shrink/path; appear/disappear are instant |
+| `data-anim-duration` | ms, integer | PowerPoint's per-effect defaults: `500` for fade/fly/wipe/split/zoom/random-bars/pulse; `1000` for float/teeter; `2000` for bounce/wheel/spin/grow/shrink/path; appear/disappear are instant |
 | `data-anim-order` | integer | document order |
+| `data-anim-repeat` | integer `2`–`100` | `1` (play once); not on appear/disappear |
+| `data-anim-auto-reverse` | `true` / `false` (bare attribute = true) | `false`; emphasis and `path` effects only |
 
 Animations sort by `data-anim-order`, then document order to break ties. `click` starts a new step and waits for the presenter — →/Space/tap play the next step before advancing the slide; `after` starts once everything already scheduled in the step has finished (PowerPoint's *After Previous*); `with` starts together with the previous one; `data-anim-delay` shifts the start in every case. Everything before the first `click` is an automatic lead-in that plays when the slide activates — so a lone `data-anim="fade-in"` simply plays on arrival, and `click` is the explicit opt-in to presenter-paced builds.
+
+`data-anim-repeat` replays the whole effect N times; `data-anim-auto-reverse` plays each pass forward then backward (a spin that unwinds, a path that returns) and is meaningful only on emphasis/path effects — on an entrance or exit it's ignored with a warning at export. `after` chaining and click-step boundaries count the full repeated/reversed length, in the preview and in the exported file alike.
 
 ```html
 <ul>
@@ -93,6 +106,8 @@ Animations sort by `data-anim-order`, then document order to break ties. `click`
 ```
 
 Don't combine `data-anim` with a hand-written `[data-deck-active]` CSS animation on the same element — pick one. Plain CSS entrance animations remain fine for pure decoration, but they do **not** export to PPTX; only `data-anim` builds do.
+
+**One `data-anim` per element.** An element carries exactly one effect — there is no "fade in, then grow" on a single attribute. When content needs two effects, give it two elements: wrap the content and put one effect on the wrapper, the other on the inner element (a `fade-in` wrapper whose child `pulse`s after it, sequenced with `data-anim-order` or `data-anim-trigger="after"`). Nested `data-anim` is otherwise legal but the innermost element wins for its subtree — the outer element's remaining parts keep the outer effect.
 
 ## Illustrations & infographics (generate them when they'll help)
 

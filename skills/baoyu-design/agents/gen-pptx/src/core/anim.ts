@@ -9,6 +9,8 @@ export interface ParsedAnim {
   warnings: string[];
 }
 
+// Defaults follow PowerPoint's own effect durations (float and pulse verified
+// against real PowerPoint-authored XML; the rest are the UI defaults).
 const DURATION_DEFAULT: Record<AnimEffect, number> = {
   appear: 1,
   disappear: 1,
@@ -17,16 +19,76 @@ const DURATION_DEFAULT: Record<AnimEffect, number> = {
   "fly-in": 500,
   "fly-out": 500,
   "wipe-in": 500,
+  "wipe-out": 500,
+  "float-in": 1000,
+  "float-out": 1000,
+  "split-in": 500,
+  "split-out": 500,
+  "bounce-in": 2000,
+  "bounce-out": 2000,
   "zoom-in": 500,
   "zoom-out": 500,
+  "wheel-in": 2000,
+  "wheel-out": 2000,
+  "random-bars-in": 500,
+  "random-bars-out": 500,
   spin: 2000,
   grow: 2000,
   shrink: 2000,
+  pulse: 500,
+  teeter: 1000,
   path: 2000,
 };
 
-const DIRECTIONAL: Record<string, 1> = { "fly-in": 1, "fly-out": 1, "wipe-in": 1 };
-const DIRS: Record<string, 1> = { left: 1, right: 1, top: 1, bottom: 1 };
+/** entr(ance)/exit/emph(asis)/path — drives the per-kind attribute rules
+ *  (auto-reverse is emphasis/path-only) and the exporter's visibility sets. */
+export const EFFECT_KIND: Record<AnimEffect, "entr" | "exit" | "emph" | "path"> = {
+  appear: "entr",
+  disappear: "exit",
+  "fade-in": "entr",
+  "fade-out": "exit",
+  "fly-in": "entr",
+  "fly-out": "exit",
+  "wipe-in": "entr",
+  "wipe-out": "exit",
+  "float-in": "entr",
+  "float-out": "exit",
+  "split-in": "entr",
+  "split-out": "exit",
+  "bounce-in": "entr",
+  "bounce-out": "exit",
+  "zoom-in": "entr",
+  "zoom-out": "exit",
+  "wheel-in": "entr",
+  "wheel-out": "exit",
+  "random-bars-in": "entr",
+  "random-bars-out": "exit",
+  spin: "emph",
+  grow: "emph",
+  shrink: "emph",
+  pulse: "emph",
+  teeter: "emph",
+  path: "path",
+};
+
+// data-anim-dir families: fly/wipe take the four edges (the side the element
+// enters from / exits toward); float is vertical-only; split/random-bars take
+// the bar/seam axis (split default matches PowerPoint's "Vertical In").
+const EDGE_DIRS: Record<string, AnimDir> = { left: "left", right: "right", top: "top", bottom: "bottom" };
+const VERT_DIRS: Record<string, AnimDir> = { top: "top", bottom: "bottom" };
+const AXIS_DIRS: Record<string, AnimDir> = { horizontal: "horizontal", vertical: "vertical" };
+const DIR_FAMILY: Partial<Record<AnimEffect, { allowed: Record<string, AnimDir>; def: AnimDir; label: string }>> = {
+  "fly-in": { allowed: EDGE_DIRS, def: "bottom", label: "left|right|top|bottom" },
+  "fly-out": { allowed: EDGE_DIRS, def: "bottom", label: "left|right|top|bottom" },
+  "wipe-in": { allowed: EDGE_DIRS, def: "bottom", label: "left|right|top|bottom" },
+  "wipe-out": { allowed: EDGE_DIRS, def: "bottom", label: "left|right|top|bottom" },
+  "float-in": { allowed: VERT_DIRS, def: "bottom", label: "top|bottom" },
+  "float-out": { allowed: VERT_DIRS, def: "bottom", label: "top|bottom" },
+  "split-in": { allowed: AXIS_DIRS, def: "vertical", label: "horizontal|vertical" },
+  "split-out": { allowed: AXIS_DIRS, def: "vertical", label: "horizontal|vertical" },
+  "random-bars-in": { allowed: AXIS_DIRS, def: "horizontal", label: "horizontal|vertical" },
+  "random-bars-out": { allowed: AXIS_DIRS, def: "horizontal", label: "horizontal|vertical" },
+};
 const TRIGGERS: Record<string, 1> = { click: 1, with: 1, after: 1 };
 
 const clampNum = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
@@ -90,36 +152,41 @@ export function parseAnimAttrs(
   const def: AnimationDef = { effect: eff, trigger, delayMs, durationMs, order, index };
 
   const rawDir = get("data-anim-dir");
-  if (eff in DIRECTIONAL) {
-    let dir: AnimDir = "bottom";
+  const fam = DIR_FAMILY[eff];
+  if (fam) {
+    let dir = fam.def;
     if (rawDir !== null) {
       const d = rawDir.trim().toLowerCase();
-      if (d in DIRS) dir = d as AnimDir;
-      else warnings.push(`invalid data-anim-dir "${rawDir}" — using "bottom"`);
+      if (d in fam.allowed) dir = fam.allowed[d];
+      else warnings.push(`invalid data-anim-dir "${rawDir}" for "${eff}" (${fam.label}) — using "${fam.def}"`);
     }
     def.dir = dir;
   } else if (rawDir !== null) {
     warnings.push(`data-anim-dir has no effect on "${eff}"`);
   }
 
-  if (eff === "spin") {
+  if (eff === "spin" || eff === "teeter") {
     const raw = get("data-anim-rotate");
-    let deg = 360;
+    // spin: total turn (default one full turn); teeter: peak rock tilt
+    // (default 5° — PowerPoint's own preset rocks ±2°, bumped for
+    // back-of-the-room legibility; override with data-anim-rotate).
+    let deg = eff === "spin" ? 360 : 5;
     if (raw !== null) {
       const v = parseFloat(raw);
-      if (Number.isNaN(v)) warnings.push(`invalid data-anim-rotate "${raw}" — using 360`);
+      if (Number.isNaN(v)) warnings.push(`invalid data-anim-rotate "${raw}" — using ${deg}`);
       else deg = clampNum(v, -3600, 3600);
     }
     if (deg === 0) {
-      warnings.push(`data-anim-rotate 0 spins nowhere — animation dropped`);
+      warnings.push(`data-anim-rotate 0 ${eff === "spin" ? "spins" : "rocks"} nowhere — animation dropped`);
       return { def: null, warnings };
     }
     def.rotateDeg = deg;
   }
 
-  if (eff === "grow" || eff === "shrink") {
+  if (eff === "grow" || eff === "shrink" || eff === "pulse") {
     const raw = get("data-anim-scale");
-    let scale = eff === "grow" ? 1.5 : 0.67;
+    // pulse peak matches PowerPoint's 105%.
+    let scale = eff === "grow" ? 1.5 : eff === "shrink" ? 0.67 : 1.05;
     if (raw !== null) {
       const v = parseFloat(raw);
       if (Number.isNaN(v)) warnings.push(`invalid data-anim-scale "${raw}" — using ${scale}`);
@@ -147,8 +214,43 @@ export function parseAnimAttrs(
     def.pathSegs = parsed.segs;
   }
 
+  const rawRepeat = get("data-anim-repeat");
+  if (rawRepeat !== null) {
+    const v = parseInt(rawRepeat, 10);
+    if (Number.isNaN(v) || v < 1) {
+      warnings.push(`invalid data-anim-repeat "${rawRepeat}" — playing once`);
+    } else if (eff === "appear" || eff === "disappear") {
+      warnings.push(`data-anim-repeat is ignored for "${eff}" (instant effect)`);
+    } else {
+      const r = clampNum(v, 1, 100);
+      if (r > 1) def.repeat = r;
+    }
+  }
+
+  const rawAutoRev = get("data-anim-auto-reverse");
+  if (rawAutoRev !== null) {
+    const b = rawAutoRev.trim().toLowerCase();
+    if (b === "" || b === "true" || b === "1") {
+      const kind = EFFECT_KIND[eff];
+      // A reversed entrance ends back at hidden and snaps visible; a reversed
+      // exit ends visible and then the re-hide pops it — both nonsense.
+      if (kind === "emph" || kind === "path") def.autoReverse = true;
+      else warnings.push(`data-anim-auto-reverse only applies to emphasis and path effects — ignored for "${eff}"`);
+    } else if (b !== "false" && b !== "0") {
+      warnings.push(`invalid data-anim-auto-reverse "${rawAutoRev}" — ignored`);
+    }
+  }
+
   return { def, warnings };
 }
+
+/**
+ * Wall-clock length of one animation including repeats and the auto-reverse
+ * return leg — what `after` chaining and click-step ends must count. Mirrored
+ * inline by deck-stage.js's _animSteps.
+ */
+export const effectiveDurationMs = (def: AnimationDef): number =>
+  def.durationMs * (def.repeat ?? 1) * (def.autoReverse ? 2 : 1);
 
 const MAX_PATH_POINTS = 32;
 

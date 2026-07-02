@@ -265,7 +265,8 @@ Then add the fullscreen-button rules. **Anchor** (the closing brace of that `.kb
 
 **Approach / invariants**:
 
-- WAAPI only, animating the independent `translate` / `rotate` / `scale` properties plus `opacity` / `clip-path` — **never** the `transform` shorthand (authors use transform for centering).
+- WAAPI only, animating the independent `translate` / `rotate` / `scale` properties plus `opacity` / `clip-path` — **never** the `transform` shorthand (authors use transform for centering). Wheel/split/random-bars approximate PowerPoint's filters with a gradient `mask-image` driven by one registered custom property (`--deck-anim-t`; see `MASK_OK` in the constants hunk). Both the mask string and the property live only inside keyframes, so `cancel()` cleans everything; browsers without `CSS.registerProperty` fall back to a plain fade.
+- Effect timing follows PowerPoint's defaults (see `ANIM_EFFECTS`); `data-anim-repeat` and `data-anim-auto-reverse` (emphasis/path only) map to WAAPI `iterations`/`direction:'alternate'`, and `_animSteps` counts the full repeated/reversed length when chaining `after` steps — the same formula gen-pptx's timing.ts uses, so preview and export stay in step.
 - No inline styles; the only DOM writes are `data-deck-anim-*` runtime attrs, which the rail's `MutationObserver` already ignores (`OWN_ATTRS` matches every `data-deck-*` except `data-deck-skip`), so playback never re-clones thumbnails. End states are held by kept-alive `fill:'both'` Animation objects (cancelled on slide deactivation); persistent hidden states are the `data-deck-anim-hidden` attr plus one injected head rule.
 - Base-state invariant: authored CSS **is** the finished layout. The head rule is scoped `@media screen` (print sees base state) and `deck-stage:not([noscale])` (PPTX capture sees base state); thumbnail clones live in nested shadow roots the descendant combinator can't reach.
 - Navigation policy (stateless): forward arrival → reset + autoplay the pre-click auto step; backward arrival → fully built instantly; leaving → cancel + strip (only the active slide carries runtime state); →/Space/tap play pending click steps before advancing (`deckstep` CustomEvent per step); ←, number keys, Home/End and rail clicks bypass steps; reduced-motion plays instantly but keeps click gating; `noscale` / `?_snthumb=` disable the engine outright.
@@ -287,12 +288,17 @@ Thirteen edits.
 
 ```js
  *  (h) build animations — slide elements carrying data-anim (fade-in/out,
- *      fly-in/out, wipe-in, zoom-in/out, appear/disappear, spin,
- *      grow/shrink, path) play with the Web Animations API and export as
- *      native PowerPoint animations via the PPTX exporter. Timing attrs:
- *      data-anim-trigger click|with|after (default after — chained
- *      autoplay on slide arrival), data-anim-delay, data-anim-duration,
- *      data-anim-order, plus per-effect data-anim-dir/-rotate/-scale/-path.
+ *      fly-in/out, wipe-in/out, float-in/out, split-in/out, bounce-in/out,
+ *      zoom-in/out, wheel-in/out, random-bars-in/out, appear/disappear,
+ *      spin, grow/shrink, pulse, teeter, path) play with the Web Animations
+ *      API and export as native PowerPoint animations via the PPTX
+ *      exporter. Timing attrs: data-anim-trigger click|with|after (default
+ *      after — chained autoplay on slide arrival), data-anim-delay,
+ *      data-anim-duration, data-anim-order, data-anim-repeat,
+ *      data-anim-auto-reverse (emphasis/path only), plus per-effect
+ *      data-anim-dir/-rotate/-scale/-path. data-anim-dir families: fly/wipe
+ *      take left|right|top|bottom, float takes top|bottom, and
+ *      split/random-bars take horizontal|vertical.
  *      →/Space/tap play pending click steps before advancing (a `deckstep`
  *      CustomEvent fires per step); ← and direct jumps (number keys,
  *      Home/End, rail clicks) bypass them. Arriving backward shows the
@@ -321,8 +327,9 @@ Thirteen edits.
  *     Author the slide at its final visible layout (the base state) and
  *     let the engine hide/reveal; the default trigger "after" autoplays on
  *     slide arrival, so `data-anim="fade-in"` alone just works. Print,
- *     thumbnails, reduced-motion and PPTX capture all see the base state
- *     with zero extra work. Hand-written CSS animations gated on
+ *     thumbnails and PPTX capture all see the base state with zero extra
+ *     work (reduced-motion is instant but click steps still gate).
+ *     Hand-written CSS animations gated on
  *     [data-deck-active] and the motion query still work for pure
  *     decoration but do NOT export to PPTX, e.g.
  *     `@media (prefers-reduced-motion:no-preference){ [data-deck-active] .x{animation:fade-in .5s both} }`.
@@ -343,29 +350,66 @@ Thirteen edits.
 ```js
   const REDUCED_MQ = matchMedia('(prefers-reduced-motion: reduce)');
 
+  // Gradient-mask effects (wheel/split/random-bars) drive one registered
+  // custom property from WAAPI keyframes. Registration can only fail where
+  // @property is unsupported — those browsers get a plain fade instead — or
+  // because a second copy of this script already registered it, which is
+  // success. Both the mask string and the animated --deck-anim-t live inside
+  // keyframes, so cancel() cleans everything (no inline styles).
+  let MASK_OK = false;
+  try {
+    if (window.CSS && CSS.registerProperty) {
+      CSS.registerProperty({ name: '--deck-anim-t', syntax: '<number>', inherits: false, initialValue: '0' });
+      MASK_OK = true;
+    }
+  } catch (err) { MASK_OK = true; }
+
   // data-anim build-animation contract, shared with the PPTX exporter
   // (gen-pptx turns the same attributes into native PowerPoint timing).
   // kind: entr(ance) effects start hidden and reveal; exit effects hide;
   // emph(asis) and path leave visibility alone. dur is the default ms when
-  // data-anim-duration is absent — appear/disappear are instant and ignore
-  // it. Runtime playback state is data-deck-anim-* attrs only, which the
-  // rail's MutationObserver already ignores (OWN_ATTRS), so playing an
-  // animation never re-clones a thumbnail.
+  // data-anim-duration is absent (PowerPoint's own effect defaults) —
+  // appear/disappear are instant and ignore it. Runtime playback state is
+  // data-deck-anim-* attrs only, which the rail's MutationObserver already
+  // ignores (OWN_ATTRS), so playing an animation never re-clones a thumbnail.
   const ANIM_HIDDEN_ATTR = 'data-deck-anim-hidden';
   const ANIM_EFFECTS = {
-    'appear':    { kind: 'entr', dur: 1 },
-    'disappear': { kind: 'exit', dur: 1 },
-    'fade-in':   { kind: 'entr', dur: 500 },
-    'fade-out':  { kind: 'exit', dur: 500 },
-    'fly-in':    { kind: 'entr', dur: 500 },
-    'fly-out':   { kind: 'exit', dur: 500 },
-    'wipe-in':   { kind: 'entr', dur: 500 },
-    'zoom-in':   { kind: 'entr', dur: 500 },
-    'zoom-out':  { kind: 'exit', dur: 500 },
-    'spin':      { kind: 'emph', dur: 2000 },
-    'grow':      { kind: 'emph', dur: 2000 },
-    'shrink':    { kind: 'emph', dur: 2000 },
-    'path':      { kind: 'path', dur: 2000 },
+    'appear':          { kind: 'entr', dur: 1 },
+    'disappear':       { kind: 'exit', dur: 1 },
+    'fade-in':         { kind: 'entr', dur: 500 },
+    'fade-out':        { kind: 'exit', dur: 500 },
+    'fly-in':          { kind: 'entr', dur: 500 },
+    'fly-out':         { kind: 'exit', dur: 500 },
+    'wipe-in':         { kind: 'entr', dur: 500 },
+    'wipe-out':        { kind: 'exit', dur: 500 },
+    'float-in':        { kind: 'entr', dur: 1000 },
+    'float-out':       { kind: 'exit', dur: 1000 },
+    'split-in':        { kind: 'entr', dur: 500 },
+    'split-out':       { kind: 'exit', dur: 500 },
+    'bounce-in':       { kind: 'entr', dur: 2000 },
+    'bounce-out':      { kind: 'exit', dur: 2000 },
+    'zoom-in':         { kind: 'entr', dur: 500 },
+    'zoom-out':        { kind: 'exit', dur: 500 },
+    'wheel-in':        { kind: 'entr', dur: 2000 },
+    'wheel-out':       { kind: 'exit', dur: 2000 },
+    'random-bars-in':  { kind: 'entr', dur: 500 },
+    'random-bars-out': { kind: 'exit', dur: 500 },
+    'spin':            { kind: 'emph', dur: 2000 },
+    'grow':            { kind: 'emph', dur: 2000 },
+    'shrink':          { kind: 'emph', dur: 2000 },
+    'pulse':           { kind: 'emph', dur: 500 },
+    'teeter':          { kind: 'emph', dur: 1000 },
+    'path':            { kind: 'path', dur: 2000 },
+  };
+
+  // Wipe clip-path insets by data-anim-dir (the side the element enters from
+  // / exits toward): wipe-in animates FROM these to inset(0), wipe-out the
+  // reverse.
+  const WIPE_INSET = {
+    left: 'inset(0 100% 0 0)',
+    right: 'inset(0 0 0 100%)',
+    top: 'inset(0 0 100% 0)',
+    bottom: 'inset(100% 0 0 0)',
   };
 ```
 
@@ -618,8 +662,8 @@ Two one-line inserts. **Anchor A** (the noscale branch):
 
     /** Parse a slide's [data-anim] elements into sorted entries. Unknown
      *  effects, path effects without a usable data-anim-path, zero-degree
-     *  spins and scale-1 grow/shrinks stay static — mirroring the
-     *  exporter's fallbacks so preview and PPTX step math agree. Sort:
+     *  spins/teeters and scale-1 grow/shrink/pulses stay static — mirroring
+     *  the exporter's fallbacks so preview and PPTX step math agree. Sort:
      *  data-anim-order (default 0) first, document order breaking ties. */
     _animModel(slide) {
       const out = [];
@@ -632,7 +676,23 @@ Two one-line inserts. **Anchor A** (the noscale branch):
           return Number.isFinite(v) ? v : dflt;
         };
         const trig = (el.getAttribute('data-anim-trigger') || '').trim();
-        const dir = (el.getAttribute('data-anim-dir') || '').trim();
+        const dirRaw = (el.getAttribute('data-anim-dir') || '').trim();
+        // dir families (same fallbacks as the exporter): fly/wipe take the
+        // four edges, float only top|bottom, split/random-bars the bar/seam
+        // axis (split defaults to PowerPoint's "Vertical In").
+        let dir = 'bottom';
+        if (effect === 'split-in' || effect === 'split-out'
+            || effect === 'random-bars-in' || effect === 'random-bars-out') {
+          const dflt = effect.indexOf('split') === 0 ? 'vertical' : 'horizontal';
+          dir = dirRaw === 'horizontal' || dirRaw === 'vertical' ? dirRaw : dflt;
+        } else if (effect === 'float-in' || effect === 'float-out') {
+          dir = dirRaw === 'top' ? 'top' : 'bottom';
+        } else if (dirRaw === 'left' || dirRaw === 'right' || dirRaw === 'top') {
+          dir = dirRaw;
+        }
+        // Auto-reverse only means something on emphasis/path effects (a
+        // reversed entrance ends hidden; a reversed exit fights the re-hide).
+        const revRaw = el.getAttribute('data-anim-auto-reverse');
         const e = {
           el,
           effect,
@@ -642,9 +702,14 @@ Two one-line inserts. **Anchor A** (the noscale branch):
           dur: spec.dur === 1 ? 1 : Math.min(60000, Math.max(1, num('data-anim-duration', spec.dur))),
           order: num('data-anim-order', 0),
           docIndex: i,
-          dir: dir === 'left' || dir === 'right' || dir === 'top' ? dir : 'bottom',
-          rotate: Math.max(-3600, Math.min(3600, num('data-anim-rotate', 360))),
-          scale: Math.max(0.1, Math.min(5, num('data-anim-scale', effect === 'shrink' ? 0.67 : 1.5))),
+          dir,
+          rotate: Math.max(-3600, Math.min(3600, num('data-anim-rotate', effect === 'teeter' ? 5 : 360))),
+          scale: Math.max(0.1, Math.min(5, num('data-anim-scale',
+            effect === 'shrink' ? 0.67 : effect === 'pulse' ? 1.05 : 1.5))),
+          repeat: spec.dur === 1 ? 1
+            : Math.max(1, Math.min(100, Math.floor(num('data-anim-repeat', 1)) || 1)),
+          autoRev: (spec.kind === 'emph' || spec.kind === 'path')
+            && revRaw !== null && /^(true|1)?$/i.test(revRaw.trim()),
           path: null,
           baseOpacity: 1,
         };
@@ -652,13 +717,14 @@ Two one-line inserts. **Anchor A** (the noscale branch):
           e.path = this._parseAnimPath(el.getAttribute('data-anim-path'));
           if (!e.path) return;
         }
-        if (effect === 'spin' && !e.rotate) return;
-        if ((effect === 'grow' || effect === 'shrink') && e.scale === 1) return;
-        // Fades/zooms must land on the author's opacity, not a hard 1 —
-        // measured here, before _animReset applies the hidden attr (whose
-        // opacity:0 !important would poison the read).
-        if (effect === 'fade-in' || effect === 'fade-out'
-            || effect === 'zoom-in' || effect === 'zoom-out') {
+        if ((effect === 'spin' || effect === 'teeter') && !e.rotate) return;
+        if ((effect === 'grow' || effect === 'shrink' || effect === 'pulse') && e.scale === 1) return;
+        // Fades and fade-composed effects must land on the author's opacity,
+        // not a hard 1 — measured here, before _animReset applies the hidden
+        // attr (whose opacity:0 !important would poison the read). The mask
+        // effects need it only for their no-@property fade fallback.
+        if (/^(fade|zoom|float|bounce)-/.test(effect) || effect === 'pulse'
+            || (!MASK_OK && /^(wheel|split|random-bars)-/.test(effect))) {
           const o = parseFloat(getComputedStyle(el).opacity);
           if (Number.isFinite(o)) e.baseOpacity = o;
         }
@@ -732,7 +798,9 @@ Two one-line inserts. **Anchor A** (the noscale branch):
         }
         steps[steps.length - 1].items.push({ e, start });
         prevStart = start;
-        stepEnd = Math.max(stepEnd, start + e.dur);
+        // `after` waits out repeats and the auto-reverse leg, not just one
+        // pass — gen-pptx's timing.ts grouping mirrors this line.
+        stepEnd = Math.max(stepEnd, start + e.dur * e.repeat * (e.autoRev ? 2 : 1));
       });
       return steps;
     }
@@ -809,6 +877,10 @@ Two one-line inserts. **Anchor A** (the noscale branch):
             delay: inst ? 0 : start,
             easing: e.effect === 'path' ? 'linear' : 'ease',
             fill: 'both',
+            // WAAPI 2N alternate iterations ≡ PowerPoint repeatCount N with
+            // autoRev — each forward leg replays backwards.
+            iterations: e.repeat * (e.autoRev ? 2 : 1),
+            direction: e.autoRev ? 'alternate' : 'normal',
           });
         } catch (err) { return; }
         if (inst) { try { anim.finish(); } catch (err) {} }
@@ -824,8 +896,11 @@ Two one-line inserts. **Anchor A** (the noscale branch):
     /** Keyframes per effect. Entrance/exit frames carry visibility so the
      *  fill phases hide the element through delays without DOM writes —
      *  discrete interpolation shows it for any progress > 0 toward
-     *  'visible'. wipe-in is a clip-path inset approximation of
-     *  PowerPoint's wipe; data-anim-dir is the "from" side throughout. */
+     *  'visible'. wipe/split/wheel/random-bars are clip-path or
+     *  gradient-mask approximations of PowerPoint's filters; data-anim-dir
+     *  is the "from/toward" side (or bar axis) throughout. Multi-frame
+     *  effects (bounce/pulse/teeter) bake their pacing into keyframe
+     *  offsets and per-frame easing. */
     _animKeyframes(e) {
       switch (e.effect) {
         case 'appear':
@@ -846,31 +921,144 @@ Two one-line inserts. **Anchor A** (the noscale branch):
           return [{ translate: '0px 0px', visibility: 'visible' },
                   { translate: o.x + 'px ' + o.y + 'px', visibility: 'hidden' }];
         }
-        case 'wipe-in': {
-          const from = {
-            left: 'inset(0 100% 0 0)',
-            right: 'inset(0 0 0 100%)',
-            top: 'inset(0 0 100% 0)',
-            bottom: 'inset(100% 0 0 0)',
-          }[e.dir];
-          return [{ clipPath: from, visibility: 'hidden' },
+        case 'wipe-in':
+          return [{ clipPath: WIPE_INSET[e.dir], visibility: 'hidden' },
                   { clipPath: 'inset(0 0 0 0)', visibility: 'visible' }];
+        case 'wipe-out':
+          // Time-reverse of wipe-in: the erase sweeps toward data-anim-dir,
+          // matching the exporter's entrance filter with transition="out".
+          return [{ clipPath: 'inset(0 0 0 0)', visibility: 'visible' },
+                  { clipPath: WIPE_INSET[e.dir], visibility: 'hidden' }];
+        case 'float-in': {
+          const dy = this._animFloatOffset(e);
+          return [{ translate: '0px ' + dy + 'px', opacity: 0, visibility: 'hidden' },
+                  { translate: '0px 0px', opacity: e.baseOpacity, visibility: 'visible' }];
         }
-        case 'zoom-in':
-          return [{ scale: '0.1', opacity: 0, visibility: 'hidden' },
-                  { scale: '1', opacity: e.baseOpacity, visibility: 'visible' }];
-        case 'zoom-out':
-          return [{ scale: '1', opacity: e.baseOpacity, visibility: 'visible' },
-                  { scale: '0.1', opacity: 0, visibility: 'hidden' }];
+        case 'float-out': {
+          const dy = this._animFloatOffset(e);
+          return [{ translate: '0px 0px', opacity: e.baseOpacity, visibility: 'visible' },
+                  { translate: '0px ' + dy + 'px', opacity: 0, visibility: 'hidden' }];
+        }
+        case 'split-in':
+        case 'split-out':
+        case 'wheel-in':
+        case 'wheel-out':
+        case 'random-bars-in':
+        case 'random-bars-out': {
+          const isIn = e.kind === 'entr';
+          // No @property support → honest fade at the same duration.
+          if (!MASK_OK) {
+            return isIn
+              ? [{ opacity: 0, visibility: 'hidden' }, { opacity: e.baseOpacity, visibility: 'visible' }]
+              : [{ opacity: e.baseOpacity, visibility: 'visible' }, { opacity: 0, visibility: 'hidden' }];
+          }
+          // One gradient string, animated only through --deck-anim-t 0→1
+          // (fully hidden → fully shown); exits play the same mask 1→0.
+          let G;
+          if (e.effect.indexOf('split') === 0) {
+            // Two bands converging on the center seam = PowerPoint's barn-in
+            // geometry ("vertical" = vertical seam, bands travel horizontally).
+            const ang = e.dir === 'horizontal' ? '180deg' : '90deg';
+            G = 'linear-gradient(' + ang + ', #000 0 calc(var(--deck-anim-t)*50%), '
+              + 'transparent calc(var(--deck-anim-t)*50%) calc(100% - var(--deck-anim-t)*50%), '
+              + '#000 calc(100% - var(--deck-anim-t)*50%) 100%)';
+          } else if (e.effect.indexOf('wheel') === 0) {
+            // Pie wedge sweeping clockwise from 12 o'clock.
+            G = 'conic-gradient(#000 0deg calc(var(--deck-anim-t)*1turn), '
+              + 'transparent calc(var(--deck-anim-t)*1turn) 1turn)';
+          } else {
+            // Two stripe families with co-prime periods growing at different
+            // rates — a cheap stand-in for random bars ("horizontal" = full-
+            // width rows, so the gradient axis runs vertically).
+            const ang = e.dir === 'vertical' ? '90deg' : '180deg';
+            G = 'repeating-linear-gradient(' + ang + ', #000 0 calc(var(--deck-anim-t)*11px), '
+              + 'transparent calc(var(--deck-anim-t)*11px) 11px), '
+              + 'repeating-linear-gradient(' + ang + ', transparent 0 7px, '
+              + '#000 7px calc(7px + var(--deck-anim-t)*10px), '
+              + 'transparent calc(7px + var(--deck-anim-t)*10px) 17px)';
+          }
+          const hidden = { '--deck-anim-t': 0, maskImage: G, visibility: 'hidden' };
+          const shown = { '--deck-anim-t': 1, maskImage: G, visibility: 'visible' };
+          return isIn ? [hidden, shown] : [shown, hidden];
+        }
+        case 'bounce-in': {
+          // Damped hops matching the exporter's motion path: in from the
+          // left quarter, drop 1/3 of the slide, rebounds of 1/9, 1/27,
+          // 1/81. Falls ease in (gravity), rises ease out.
+          const c = this._animCanvasSize();
+          const fx = [-0.25, -0.085, -0.053, -0.021, -0.014, -0.0075, -0.004, 0];
+          const fy = [-0.33333, 0, -0.11111, 0, -0.037, 0, -0.0123, 0];
+          const offs = [0, 0.36, 0.55, 0.73, 0.82, 0.91, 0.955, 1];
+          return offs.map((off, k) => ({
+            offset: off,
+            translate: Math.round(fx[k] * c.w) + 'px ' + Math.round(fy[k] * c.h) + 'px',
+            opacity: k === 0 ? 0 : e.baseOpacity,
+            visibility: k === 0 ? 'hidden' : 'visible',
+            easing: k % 2 === 0 ? 'ease-in' : 'ease-out',
+          }));
+        }
+        case 'bounce-out': {
+          // Growing hops, then the plunge off the bottom drifting right;
+          // fades over the final fifth like the exporter's late fade.
+          const c = this._animCanvasSize();
+          const fx = [0, 0.004, 0.0075, 0.014, 0.021, 0.053, 0.085, 0.25];
+          const fy = [0, -0.0123, 0, -0.037, 0, -0.111, 0, 1.1];
+          const offs = [0, 0.045, 0.09, 0.185, 0.28, 0.46, 0.64, 1];
+          const frames = offs.map((off, k) => ({
+            offset: off,
+            translate: Math.round(fx[k] * c.w) + 'px ' + Math.round(fy[k] * c.h) + 'px',
+            opacity: e.baseOpacity,
+            visibility: 'visible',
+            easing: k % 2 === 0 ? 'ease-out' : 'ease-in',
+          }));
+          frames[frames.length - 2].easing = 'ease-in'; // the plunge
+          frames[frames.length - 1].opacity = 0;
+          frames[frames.length - 1].visibility = 'hidden';
+          frames.splice(frames.length - 1, 0, { offset: 0.8, opacity: e.baseOpacity });
+          return frames;
+        }
         case 'spin':
           return [{ rotate: '0deg' }, { rotate: e.rotate + 'deg' }];
         case 'grow':
         case 'shrink':
           return [{ scale: '1' }, { scale: String(e.scale) }];
+        case 'pulse':
+          // Scale to the peak and back with a mid-effect opacity dip —
+          // PowerPoint's tmFilter curve baked into offsets.
+          return [
+            { offset: 0, scale: '1', opacity: e.baseOpacity },
+            { offset: 0.2, opacity: 0.5 * e.baseOpacity },
+            { offset: 0.5, scale: String(e.scale) },
+            { offset: 0.8, opacity: 0.5 * e.baseOpacity },
+            { offset: 1, scale: '1', opacity: e.baseOpacity },
+          ];
+        case 'teeter': {
+          // Rock +A −A +A −A and settle, holding the first tilt briefly —
+          // the same five-step schedule the exporter writes.
+          const A = e.rotate;
+          const offs = [0, 0.1, 0.2, 0.4, 0.6, 0.8, 1];
+          const rots = [0, A, A, -A, A, -A, 0];
+          return offs.map((off, k) => ({ offset: off, rotate: rots[k] + 'deg', easing: 'ease-in-out' }));
+        }
         case 'path':
           return e.path.map((p) => ({ translate: p.x + 'px ' + p.y + 'px' }));
       }
       return [{}, {}];
+    }
+
+    /** Design-space canvas size (viewport rects are scaled; divide it out). */
+    _animCanvasSize() {
+      const s = this._scale || 1;
+      const cr = this._canvas.getBoundingClientRect();
+      return { w: cr.width / s, h: cr.height / s };
+    }
+
+    /** Float drift in design-space px — 0.1 canvas heights, the same offset
+     *  the exporter writes (#ppt_y±.1); dir is the side it drifts in from /
+     *  out to. */
+    _animFloatOffset(e) {
+      const dy = 0.1 * this._animCanvasSize().h;
+      return e.dir === 'top' ? -dy : dy;
     }
 
     /** Fly distance in design-space px — from the element's base rect to
@@ -940,4 +1128,6 @@ Two one-line inserts. **Anchor A** (the noscale branch):
 - With "reduce motion" emulated, arrivals and steps apply instantly but the click gating still consumes →/Space/tap.
 - Setting `noscale` (or loading with `?_snthumb=`) shows the pure authored base state — no hidden attrs, no animations.
 - A deck with no `[data-anim]`, or one using the old `[data-deck-active]` CSS-animation convention, behaves exactly as before.
+- A slide carrying every effect (`appear`/`disappear`, `fade`/`fly`/`wipe`/`float`/`split`/`bounce`/`zoom`/`wheel`/`random-bars` in/out, `spin`/`grow`/`shrink`/`pulse`/`teeter`, `path`) steps through cleanly; wheel/split/random-bars sweep their masks (or fade where `CSS.registerProperty` is unavailable) and leave no inline styles after `_animClear`.
+- A `data-anim-repeat="3"` emphasis followed by a `trigger="after"` element delays the follower by 3× the duration (2× more with `data-anim-auto-reverse`), matching the exported PPTX timing.
 - `node --check deck-stage.js` passes.

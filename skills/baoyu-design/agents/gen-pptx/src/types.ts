@@ -47,15 +47,30 @@ export type AnimEffect =
   | "fly-in"
   | "fly-out"
   | "wipe-in"
+  | "wipe-out"
+  | "float-in"
+  | "float-out"
+  | "split-in"
+  | "split-out"
+  | "bounce-in"
+  | "bounce-out"
   | "zoom-in"
   | "zoom-out"
+  | "wheel-in"
+  | "wheel-out"
+  | "random-bars-in"
+  | "random-bars-out"
   | "spin"
   | "grow"
   | "shrink"
+  | "pulse"
+  | "teeter"
   | "path";
 
 export type AnimTrigger = "click" | "with" | "after";
-export type AnimDir = "left" | "right" | "top" | "bottom";
+/** Edge dirs (fly/wipe: the side the element enters from / exits toward; float:
+ *  top|bottom only) plus axis dirs (split/random-bars: the bar/seam axis). */
+export type AnimDir = "left" | "right" | "top" | "bottom" | "horizontal" | "vertical";
 
 /** One motion-path segment, px offsets re-based so the path starts at (0,0). */
 export interface AnimPathSeg {
@@ -78,6 +93,10 @@ export interface AnimationDef {
   rotateDeg?: number;
   scale?: number;
   pathSegs?: AnimPathSeg[];
+  /** data-anim-repeat (2–100); absent means play once. */
+  repeat?: number;
+  /** data-anim-auto-reverse — emphasis/path effects only; absent means off. */
+  autoReverse?: boolean;
 }
 
 /** A captured DOM node. Mirrors the tree the in-page walk() emits. */

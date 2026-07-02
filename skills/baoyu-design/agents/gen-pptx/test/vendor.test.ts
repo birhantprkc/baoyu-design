@@ -82,3 +82,35 @@ test("vendor: shape-id contract and timing round-trip", async () => {
   assert.ok(!slide2.includes("<p:timing>"), "slide2 must not contain a timing tree");
   assert.match(slide2, /<\/p:clrMapOvr><\/p:sld>$/);
 });
+
+test("vendor: new-effect timing round-trips (split, wheel, pulse+repeat)", async () => {
+  const pptx = new PptxGenJS();
+  pptx.defineLayout({ name: "T", width: 10, height: 5.625 });
+  pptx.layout = "T";
+
+  const s1 = pptx.addSlide();
+  s1.addShape("rect", { x: 0, y: 0, w: 2, h: 1, fill: { color: "336699" }, objectName: "anim-s1-n0-k0" });
+  s1.addShape("rect", { x: 3, y: 0, w: 2, h: 1, fill: { color: "993366" }, objectName: "anim-s1-n1-k0" });
+  s1.addText("pulse", { x: 1, y: 3, w: 3, h: 1, objectName: "anim-s1-n2-k0" });
+
+  const base = { trigger: "after" as const, delayMs: 0, order: 0 };
+  s1._timingXml = buildTimingXml(
+    [
+      { def: { ...base, effect: "split-in", dir: "vertical", durationMs: 500, index: 0 }, spids: [2] },
+      { def: { ...base, effect: "wheel-out", durationMs: 2000, index: 1, trigger: "click" }, spids: [3] },
+      { def: { ...base, effect: "pulse", scale: 1.05, durationMs: 500, index: 2, repeat: 2 }, spids: [4] },
+    ],
+    1920,
+    1080,
+  );
+
+  const buffer = (await pptx.write({ outputType: "nodebuffer" })) as Buffer;
+  const zip = await JSZip.loadAsync(buffer);
+  const slide1 = await zip.file("ppt/slides/slide1.xml")!.async("string");
+
+  assert.match(slide1, /<\/p:clrMapOvr><p:timing>.*<\/p:timing><\/p:sld>$/);
+  assert.match(slide1, /filter="barn\(inVertical\)"/);
+  assert.match(slide1, /transition="out" filter="wheel\(1\)"/);
+  assert.match(slide1, /repeatCount="2000"/);
+  assert.match(slide1, /tmFilter="0,0; \.2,\.5; \.8,\.5; 1,0"/);
+});

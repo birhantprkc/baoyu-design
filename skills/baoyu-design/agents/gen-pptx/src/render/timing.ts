@@ -10,13 +10,23 @@
 // at a nonexistent shape id make PowerPoint show its repair dialog.
 
 import type { AnimationDef, AnimDir } from "../types.ts";
-import { pathToOoxml } from "../core/anim.ts";
+import { effectiveDurationMs, pathToOoxml } from "../core/anim.ts";
 
 export interface TimingAnim {
   def: AnimationDef;
   spids: number[];
 }
 
+/** The four edge values data-anim-dir can hold for fly/wipe/float effects
+ *  (the parser guarantees the family per effect, so casts from AnimDir are safe). */
+type EdgeDir = "left" | "right" | "top" | "bottom";
+type AxisDir = "horizontal" | "vertical";
+
+// presetID/presetClass label the effect in PowerPoint's Animation Pane;
+// playback comes from the behaviors. IDs verified against LibreOffice's
+// oox preset table and ONLYOFFICE sdkjs (float 42/47 and split subtypes from
+// real PowerPoint-authored XML). float's pid is dir-dependent — resolved in
+// effectPar() — so its table rows carry the dir=bottom value.
 const PRESET: Record<string, { pid: number; cls: string }> = {
   appear: { pid: 1, cls: "entr" },
   disappear: { pid: 1, cls: "exit" },
@@ -25,35 +35,85 @@ const PRESET: Record<string, { pid: number; cls: string }> = {
   "fly-in": { pid: 2, cls: "entr" },
   "fly-out": { pid: 2, cls: "exit" },
   "wipe-in": { pid: 22, cls: "entr" },
+  "wipe-out": { pid: 22, cls: "exit" },
+  "float-in": { pid: 42, cls: "entr" },
+  "float-out": { pid: 42, cls: "exit" },
+  "split-in": { pid: 16, cls: "entr" },
+  "split-out": { pid: 16, cls: "exit" },
+  "bounce-in": { pid: 26, cls: "entr" },
+  "bounce-out": { pid: 26, cls: "exit" },
   "zoom-in": { pid: 23, cls: "entr" },
   "zoom-out": { pid: 23, cls: "exit" },
+  "wheel-in": { pid: 21, cls: "entr" },
+  "wheel-out": { pid: 21, cls: "exit" },
+  "random-bars-in": { pid: 14, cls: "entr" },
+  "random-bars-out": { pid: 14, cls: "exit" },
   spin: { pid: 8, cls: "emph" },
   grow: { pid: 6, cls: "emph" },
   shrink: { pid: 6, cls: "emph" },
+  pulse: { pid: 26, cls: "emph" },
+  teeter: { pid: 32, cls: "emph" },
   path: { pid: 0, cls: "path" },
 };
 
 // Fly/wipe presetSubtype direction flags (UI label only; motion comes from the
 // behaviors): top=1 right=2 bottom=4 left=8.
-const DIR_FLAG: Record<AnimDir, number> = { top: 1, right: 2, bottom: 4, left: 8 };
+const DIR_FLAG: Record<EdgeDir, number> = { top: 1, right: 2, bottom: 4, left: 8 };
+
+// Split presetSubtypes (PowerPoint's Effect Options labels; verified from
+// ONLYOFFICE's preset table): in { vertical 21, horizontal 26 },
+// out { vertical 37, horizontal 42 }.
+const SPLIT_SUBTYPE: Record<"split-in" | "split-out", Record<AxisDir, number>> = {
+  "split-in": { vertical: 21, horizontal: 26 },
+  "split-out": { vertical: 37, horizontal: 42 },
+};
+
+// Random-bars presetSubtypes: horizontal 10, vertical 5.
+const RANDOMBAR_SUBTYPE: Record<AxisDir, number> = { horizontal: 10, vertical: 5 };
 
 // Wipe filter: named by the direction the reveal travels, so entering "from
-// bottom" wipes upward.
-const WIPE_FILTER: Record<AnimDir, string> = {
+// bottom" wipes upward. Exits reuse the same token with transition="out"
+// (the reveal played backwards — the element erases toward data-anim-dir).
+const WIPE_FILTER: Record<EdgeDir, string> = {
   bottom: "wipe(up)",
   top: "wipe(down)",
   left: "wipe(right)",
   right: "wipe(left)",
 };
 
+// Split ("barn door") filters — the long spellings are the only ones OOXML
+// consumers recognize (barn(inVert) matches nothing).
+const BARN_FILTER: Record<"split-in" | "split-out", Record<AxisDir, string>> = {
+  "split-in": { vertical: "barn(inVertical)", horizontal: "barn(inHorizontal)" },
+  "split-out": { vertical: "barn(outVertical)", horizontal: "barn(outHorizontal)" },
+};
+
 // Offscreen start coordinates for fly (normalized slide fractions; #ppt_x/#ppt_y
 // are the shape's own resting center, #ppt_w/#ppt_h its size).
-const FLY_FROM: Record<AnimDir, { x: string; y: string }> = {
+const FLY_FROM: Record<EdgeDir, { x: string; y: string }> = {
   left: { x: "0-#ppt_w/2", y: "#ppt_y" },
   right: { x: "1+#ppt_w/2", y: "#ppt_y" },
   top: { x: "#ppt_x", y: "0-#ppt_h/2" },
   bottom: { x: "#ppt_x", y: "1+#ppt_h/2" },
 };
+
+// Float drifts 0.1 slide-heights while fading (the offset PowerPoint itself
+// writes for Float In); dir is the side the element drifts in from / out to.
+const FLOAT_FROM: Record<"top" | "bottom", string> = {
+  bottom: "#ppt_y+.1",
+  top: "#ppt_y-.1",
+};
+
+// Bounce is approximated compositionally (PowerPoint's own preset is a page of
+// sine formulas): enter from the left quarter with damped parabolic hops of
+// 1/3, 1/9, 1/27, 1/81 slide heights (control-y = apex·4/3 makes each cubic a
+// parabola); exit hops the same shape reversed, then plunges off the bottom.
+const BOUNCE_IN_PATH =
+  "M -0.25 -0.33333 C -0.195 -0.21 -0.14 -0.075 -0.085 0 C -0.064 -0.14815 -0.042 -0.14815 -0.021 0" +
+  " C -0.0165 -0.04933 -0.012 -0.04933 -0.0075 0 C -0.005 -0.0164 -0.0025 -0.0164 0 0 E";
+const BOUNCE_OUT_PATH =
+  "M 0 0 C 0.0025 -0.0164 0.005 -0.0164 0.0075 0 C 0.012 -0.04933 0.0165 -0.04933 0.021 0" +
+  " C 0.042 -0.14815 0.064 -0.14815 0.085 0 C 0.14 0.09 0.195 0.45 0.25 1.1 E";
 
 export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: number): string {
   const live = anims.filter((a) => a.spids.length > 0);
@@ -73,9 +133,25 @@ export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: 
     `<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr>` +
     `<p:to><p:strVal val="${val}"/></p:to></p:set>`;
 
-  const animEffect = (spid: number, dir: "in" | "out", filter: string, dur: number): string =>
+  // Optional per-behavior start offset within the effect (SMIL stCondLst) —
+  // teeter's chained rocks and bounce-out's late fade start mid-effect.
+  const bhvrCTn = (dur: number, delay?: number, extra = ""): string =>
+    delay
+      ? `<p:cTn id="${nid()}" dur="${dur}" fill="hold"${extra}><p:stCondLst><p:cond delay="${delay}"/></p:stCondLst></p:cTn>`
+      : `<p:cTn id="${nid()}" dur="${dur}" fill="hold"${extra}/>`;
+
+  const animEffect = (
+    spid: number,
+    dir: "in" | "out",
+    filter: string,
+    dur: number,
+    opts: { tmFilter?: string; delay?: number } = {},
+  ): string =>
     `<p:animEffect transition="${dir}" filter="${filter}">` +
-    `<p:cBhvr><p:cTn id="${nid()}" dur="${dur}"/>` +
+    `<p:cBhvr${opts.tmFilter ? ` tmFilter="${opts.tmFilter}"` : ""}>` +
+    (opts.delay
+      ? `<p:cTn id="${nid()}" dur="${dur}"><p:stCondLst><p:cond delay="${opts.delay}"/></p:stCondLst></p:cTn>`
+      : `<p:cTn id="${nid()}" dur="${dur}"/>`) +
     `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl></p:cBhvr></p:animEffect>`;
 
   const flyAnim = (spid: number, attr: "ppt_x" | "ppt_y", from: string, to: string, dur: number): string =>
@@ -91,10 +167,35 @@ export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: 
     `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl></p:cBhvr>` +
     `<p:from x="${from}" y="${from}"/><p:to x="${to}" y="${to}"/></p:animScale>`;
 
+  // Relative scale (grow/shrink/pulse). autoRev makes the behavior itself
+  // return to base — pulse's up-and-back.
+  const animScaleBy = (spid: number, by: number, dur: number, autoRev = false): string =>
+    `<p:animScale><p:cBhvr>` +
+    bhvrCTn(dur, undefined, autoRev ? ` autoRev="1"` : "") +
+    `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl></p:cBhvr>` +
+    `<p:by x="${by}" y="${by}"/></p:animScale>`;
+
+  // Relative rotation in 60000ths of a degree (spin's one turn, teeter's rocks).
+  const animRotBy = (spid: number, by: number, dur: number, delay?: number): string =>
+    `<p:animRot by="${by}"><p:cBhvr>` +
+    bhvrCTn(dur, delay) +
+    `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl>` +
+    `<p:attrNameLst><p:attrName>r</p:attrName></p:attrNameLst></p:cBhvr></p:animRot>`;
+
+  // Motion along an OOXML slide-fraction path (custom data-anim-path + bounce).
+  const animMotionPath = (spid: number, path: string, dur: number): string =>
+    `<p:animMotion origin="layout" path="${path}" pathEditMode="relative" ptsTypes="">` +
+    `<p:cBhvr><p:cTn id="${nid()}" dur="${dur}" fill="hold"/>` +
+    `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl>` +
+    `<p:attrNameLst><p:attrName>ppt_x</p:attrName><p:attrName>ppt_y</p:attrName></p:attrNameLst>` +
+    `</p:cBhvr></p:animMotion>`;
+
   // Behaviors for one animation applied to one shape.
   const behaviors = (def: AnimationDef, spid: number): string => {
     const d = def.durationMs;
-    const dir = def.dir ?? "bottom";
+    const edge = (def.dir ?? "bottom") as EdgeDir;
+    const axis = def.dir as AxisDir;
+    const hide = setVis(spid, "hidden", Math.max(d - 1, 0));
     switch (def.effect) {
       case "appear":
         return setVis(spid, "visible", 0);
@@ -103,9 +204,9 @@ export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: 
       case "fade-in":
         return setVis(spid, "visible", 0) + animEffect(spid, "in", "fade", d);
       case "fade-out":
-        return animEffect(spid, "out", "fade", d) + setVis(spid, "hidden", Math.max(d - 1, 0));
+        return animEffect(spid, "out", "fade", d) + hide;
       case "fly-in": {
-        const from = FLY_FROM[dir];
+        const from = FLY_FROM[edge];
         return (
           setVis(spid, "visible", 0) +
           flyAnim(spid, "ppt_x", from.x, "#ppt_x", d) +
@@ -113,67 +214,126 @@ export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: 
         );
       }
       case "fly-out": {
-        const to = FLY_FROM[dir];
+        const to = FLY_FROM[edge];
         return (
           flyAnim(spid, "ppt_x", "#ppt_x", to.x, d) +
           flyAnim(spid, "ppt_y", "#ppt_y", to.y, d) +
-          setVis(spid, "hidden", Math.max(d - 1, 0))
+          hide
         );
       }
       case "wipe-in":
-        return setVis(spid, "visible", 0) + animEffect(spid, "in", WIPE_FILTER[dir], d);
+        return setVis(spid, "visible", 0) + animEffect(spid, "in", WIPE_FILTER[edge], d);
+      case "wipe-out":
+        return animEffect(spid, "out", WIPE_FILTER[edge], d) + hide;
+      case "float-in":
+        return (
+          setVis(spid, "visible", 0) +
+          animEffect(spid, "in", "fade", d) +
+          flyAnim(spid, "ppt_y", FLOAT_FROM[edge as "top" | "bottom"], "#ppt_y", d)
+        );
+      case "float-out":
+        return (
+          animEffect(spid, "out", "fade", d) +
+          flyAnim(spid, "ppt_y", "#ppt_y", FLOAT_FROM[edge as "top" | "bottom"], d) +
+          hide
+        );
+      case "split-in":
+        return setVis(spid, "visible", 0) + animEffect(spid, "in", BARN_FILTER["split-in"][axis], d);
+      case "split-out":
+        return animEffect(spid, "out", BARN_FILTER["split-out"][axis], d) + hide;
+      case "bounce-in":
+        return (
+          setVis(spid, "visible", 0) +
+          animEffect(spid, "in", "fade", Math.max(1, Math.round(d * 0.32))) +
+          animMotionPath(spid, BOUNCE_IN_PATH, d)
+        );
+      case "bounce-out":
+        return (
+          animMotionPath(spid, BOUNCE_OUT_PATH, d) +
+          animEffect(spid, "out", "fade", Math.max(1, Math.round(d * 0.2)), { delay: Math.round(d * 0.8) }) +
+          hide
+        );
       case "zoom-in":
         // from 10% (not 0) — matches the preview approximation and avoids
         // degenerate zero-scale frames in some renderers.
         return setVis(spid, "visible", 0) + animEffect(spid, "in", "fade", d) + animScaleFromTo(spid, 10000, 100000, d);
       case "zoom-out":
-        return (
-          animEffect(spid, "out", "fade", d) +
-          animScaleFromTo(spid, 100000, 10000, d) +
-          setVis(spid, "hidden", Math.max(d - 1, 0))
-        );
-      case "spin": {
-        const by = Math.round((def.rotateDeg ?? 360) * 60000);
-        return (
-          `<p:animRot by="${by}"><p:cBhvr><p:cTn id="${nid()}" dur="${d}" fill="hold"/>` +
-          `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl>` +
-          `<p:attrNameLst><p:attrName>r</p:attrName></p:attrNameLst></p:cBhvr></p:animRot>`
-        );
-      }
+        return animEffect(spid, "out", "fade", d) + animScaleFromTo(spid, 100000, 10000, d) + hide;
+      case "wheel-in":
+        return setVis(spid, "visible", 0) + animEffect(spid, "in", "wheel(1)", d);
+      case "wheel-out":
+        return animEffect(spid, "out", "wheel(1)", d) + hide;
+      case "random-bars-in":
+        return setVis(spid, "visible", 0) + animEffect(spid, "in", `randombar(${axis})`, d);
+      case "random-bars-out":
+        return animEffect(spid, "out", `randombar(${axis})`, d) + hide;
+      case "spin":
+        return animRotBy(spid, Math.round((def.rotateDeg ?? 360) * 60000), d);
       case "grow":
-      case "shrink": {
-        const v = Math.round((def.scale ?? (def.effect === "grow" ? 1.5 : 0.67)) * 100000);
+      case "shrink":
+        return animScaleBy(spid, Math.round((def.scale ?? (def.effect === "grow" ? 1.5 : 0.67)) * 100000), d);
+      case "pulse":
+        // PowerPoint's own Pulse: a mid-effect fade dip (tmFilter) plus an
+        // auto-reversed scale to the peak and back.
         return (
-          `<p:animScale><p:cBhvr><p:cTn id="${nid()}" dur="${d}" fill="hold"/>` +
-          `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl></p:cBhvr>` +
-          `<p:by x="${v}" y="${v}"/></p:animScale>`
+          animEffect(spid, "out", "fade", d, { tmFilter: "0,0; .2,.5; .8,.5; 1,0" }) +
+          animScaleBy(spid, Math.round((def.scale ?? 1.05) * 100000), Math.max(1, Math.round(d / 2)), true)
+        );
+      case "teeter": {
+        // Five chained rocks summing to zero net rotation (+R −2R +2R −2R +R).
+        const r = Math.round((def.rotateDeg ?? 5) * 60000);
+        const t = (f: number): number => Math.round(d * f);
+        return (
+          animRotBy(spid, r, Math.max(1, t(0.1))) +
+          animRotBy(spid, -2 * r, Math.max(1, t(0.2)), t(0.2)) +
+          animRotBy(spid, 2 * r, Math.max(1, t(0.2)), t(0.4)) +
+          animRotBy(spid, -2 * r, Math.max(1, t(0.2)), t(0.6)) +
+          animRotBy(spid, r, Math.max(1, t(0.2)), t(0.8))
         );
       }
-      case "path": {
-        const path = pathToOoxml(def.pathSegs ?? [], slideWpx, slideHpx);
-        return (
-          `<p:animMotion origin="layout" path="${path}" pathEditMode="relative" ptsTypes="">` +
-          `<p:cBhvr><p:cTn id="${nid()}" dur="${d}" fill="hold"/>` +
-          `<p:tgtEl><p:spTgt spid="${spid}"/></p:tgtEl>` +
-          `<p:attrNameLst><p:attrName>ppt_x</p:attrName><p:attrName>ppt_y</p:attrName></p:attrNameLst>` +
-          `</p:cBhvr></p:animMotion>`
-        );
-      }
+      case "path":
+        return animMotionPath(spid, pathToOoxml(def.pathSegs ?? [], slideWpx, slideHpx), d);
     }
   };
 
   // One effect par per target shape: the first carries the animation's trigger
   // nodeType, extra shapes ride along as withEffect so a multi-shape element
   // animates as one.
+  const presetSubtype = (def: AnimationDef): number => {
+    switch (def.effect) {
+      case "fly-in":
+      case "fly-out":
+      case "wipe-in":
+      case "wipe-out":
+        return DIR_FLAG[(def.dir ?? "bottom") as EdgeDir];
+      case "split-in":
+      case "split-out":
+        return SPLIT_SUBTYPE[def.effect][def.dir as AxisDir];
+      case "random-bars-in":
+      case "random-bars-out":
+        return RANDOMBAR_SUBTYPE[def.dir as AxisDir];
+      case "wheel-in":
+      case "wheel-out":
+        return 1; // spoke count
+      default:
+        return 0;
+    }
+  };
+
   const effectPar = (def: AnimationDef, spid: number, nodeType: string): string => {
     const preset = PRESET[def.effect];
-    const sub =
-      def.effect === "fly-in" || def.effect === "fly-out" || def.effect === "wipe-in"
-        ? DIR_FLAG[def.dir ?? "bottom"]
-        : 0;
+    // Float's Animation-pane label depends on the drift side: Float Up
+    // (rise/ascend) = 42, Float Down (descend) = 47 — same pair on both the
+    // entrance and exit classes with our "drifts in from / out to" dir.
+    const pid =
+      (def.effect === "float-in" || def.effect === "float-out") && def.dir === "top" ? 47 : preset.pid;
+    // repeatCount is in 1000ths; autoRev replays the whole child timeline
+    // backwards after each forward leg (emphasis/path only — parser-enforced).
+    const rep = def.repeat ? ` repeatCount="${def.repeat * 1000}"` : "";
+    const rev = def.autoReverse ? ` autoRev="1"` : "";
     return (
-      `<p:par><p:cTn id="${nid()}" presetID="${preset.pid}" presetClass="${preset.cls}" ` +
-      `presetSubtype="${sub}" fill="hold" grpId="0" nodeType="${nodeType}">` +
+      `<p:par><p:cTn id="${nid()}" presetID="${pid}" presetClass="${preset.cls}" ` +
+      `presetSubtype="${presetSubtype(def)}"${rep}${rev} fill="hold" grpId="0" nodeType="${nodeType}">` +
       `<p:stCondLst><p:cond delay="0"/></p:stCondLst>` +
       `<p:childTnLst>${behaviors(def, spid)}</p:childTnLst>` +
       `</p:cTn></p:par>`
@@ -207,7 +367,9 @@ export function buildTimingXml(anims: TimingAnim[], slideWpx: number, slideHpx: 
         : groupEnd + a.def.delayMs;
     g.items.push({ def: a.def, spids: a.spids, start });
     prevStart = start;
-    groupEnd = Math.max(groupEnd, start + a.def.durationMs);
+    // `after` waits out repeats and the auto-reverse leg, not just one pass —
+    // deck-stage.js's _animSteps mirrors this line.
+    groupEnd = Math.max(groupEnd, start + effectiveDurationMs(a.def));
   }
 
   // Ids mint in document order (group → animation → effect → behaviors), like

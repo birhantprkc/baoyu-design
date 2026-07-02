@@ -49,3 +49,25 @@ test("extractTextRuns: anim deeper in a child subtree also blocks absorption", (
   const parent = el("p", { children: [wrap] });
   assert.equal(extractTextRuns(parent).consumed.size, 0);
 });
+
+test("merge gates fire for new effects and repeat/auto-reverse defs alike", () => {
+  // The gates key off `anim` presence, not the effect — a teeter with repeat
+  // and auto-reverse must block merging exactly like fade-in does.
+  const teeter: AnimationDef = {
+    effect: "teeter",
+    trigger: "click",
+    delayMs: 0,
+    durationMs: 1000,
+    order: 0,
+    index: 2,
+    rotateDeg: 5,
+    repeat: 3,
+    autoReverse: true,
+  };
+  const li = (text: string): SlideNode => el("li", { text, style: { listStyleType: "disc" } });
+  assert.equal(detectList(el("ul", { children: [li("one"), { ...li("two"), anim: teeter }] })), null);
+
+  const span = (text: string): SlideNode => el("span", { text, style: { display: "inline" } });
+  const parent = el("p", { children: [span("hello"), { ...span("world"), anim: teeter }] });
+  assert.equal(extractTextRuns(parent).consumed.size, 0);
+});

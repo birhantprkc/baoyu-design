@@ -154,3 +154,188 @@ test("buildTimingXml: empty and all-hidden input produce no timing", () => {
   assert.equal(buildTimingXml([], 1920, 1080), "");
   assert.equal(buildTimingXml([anim([], {})], 1920, 1080), "");
 });
+
+test("buildTimingXml: new-effect fragments", () => {
+  const w = 1280;
+  const h = 720;
+  const one = (over: Partial<AnimationDef>) => buildTimingXml([anim([2], over)], w, h);
+
+  // wipe-out: entrance token reversed by transition="out", subtype from dir,
+  // hidden lands at D-1.
+  const wipeOut = one({ effect: "wipe-out", dir: "bottom", durationMs: 600 });
+  assert.match(wipeOut, /presetID="22" presetClass="exit" presetSubtype="4"/);
+  assert.match(wipeOut, /<p:animEffect transition="out" filter="wipe\(up\)">/);
+  assert.match(wipeOut, /<p:cond delay="599"\/>.*<p:strVal val="hidden"\/>/);
+
+  // float: fade + 0.1-slide-height ppt_y drift; Float Up = 42, Float Down = 47.
+  const floatUp = one({ effect: "float-in", dir: "bottom", durationMs: 1000 });
+  assert.match(floatUp, /presetID="42" presetClass="entr"/);
+  assert.match(floatUp, /<p:animEffect transition="in" filter="fade">/);
+  assert.match(floatUp, /<p:strVal val="#ppt_y\+\.1"\/>/);
+  assert.match(floatUp, /<p:strVal val="#ppt_y"\/>/);
+  assert.ok(!/ppt_x<\/p:attrName>/.test(floatUp), "float animates y only");
+  const floatDown = one({ effect: "float-in", dir: "top" });
+  assert.match(floatDown, /presetID="47" presetClass="entr"/);
+  assert.match(floatDown, /<p:strVal val="#ppt_y-\.1"\/>/);
+  const floatOut = one({ effect: "float-out", dir: "top", durationMs: 1000 });
+  assert.match(floatOut, /presetID="47" presetClass="exit"/);
+  assert.match(floatOut, /<p:animEffect transition="out" filter="fade">/);
+  assert.match(floatOut, /<p:cond delay="999"\/>.*<p:strVal val="hidden"\/>/);
+
+  // split: long-form barn filters and the verified subtype table.
+  const splitInV = one({ effect: "split-in", dir: "vertical" });
+  assert.match(splitInV, /presetID="16" presetClass="entr" presetSubtype="21"/);
+  assert.match(splitInV, /filter="barn\(inVertical\)"/);
+  const splitInH = one({ effect: "split-in", dir: "horizontal" });
+  assert.match(splitInH, /presetSubtype="26"/);
+  assert.match(splitInH, /filter="barn\(inHorizontal\)"/);
+  const splitOutV = one({ effect: "split-out", dir: "vertical" });
+  assert.match(splitOutV, /presetID="16" presetClass="exit" presetSubtype="37"/);
+  assert.match(splitOutV, /transition="out" filter="barn\(outVertical\)"/);
+  const splitOutH = one({ effect: "split-out", dir: "horizontal" });
+  assert.match(splitOutH, /presetSubtype="42"/);
+  assert.match(splitOutH, /filter="barn\(outHorizontal\)"/);
+
+  // bounce: damped-hop motion path + early fade in / late fade out.
+  const bounceIn = one({ effect: "bounce-in", durationMs: 2000 });
+  assert.match(bounceIn, /presetID="26" presetClass="entr"/);
+  assert.match(bounceIn, /path="M -0\.25 -0\.33333 C /);
+  assert.match(bounceIn, /<p:animEffect transition="in" filter="fade"><p:cBhvr><p:cTn id="\d+" dur="640"\/>/);
+  const bounceOut = one({ effect: "bounce-out", durationMs: 2000 });
+  assert.match(bounceOut, /presetID="26" presetClass="exit"/);
+  assert.match(bounceOut, /path="M 0 0 C 0\.0025 -0\.0164 /);
+  // late fade: dur 400 starting at 1600
+  assert.match(bounceOut, /transition="out" filter="fade"><p:cBhvr><p:cTn id="\d+" dur="400"><p:stCondLst><p:cond delay="1600"\/>/);
+
+  // wheel: one spoke, subtype 1.
+  const wheelIn = one({ effect: "wheel-in" });
+  assert.match(wheelIn, /presetID="21" presetClass="entr" presetSubtype="1"/);
+  assert.match(wheelIn, /filter="wheel\(1\)"/);
+  const wheelOut = one({ effect: "wheel-out", durationMs: 2000 });
+  assert.match(wheelOut, /presetClass="exit"/);
+  assert.match(wheelOut, /transition="out" filter="wheel\(1\)"/);
+  assert.match(wheelOut, /<p:cond delay="1999"\/>.*hidden/);
+
+  // random-bars: axis filter + subtype (horizontal 10, vertical 5).
+  const rbH = one({ effect: "random-bars-in", dir: "horizontal" });
+  assert.match(rbH, /presetID="14" presetClass="entr" presetSubtype="10"/);
+  assert.match(rbH, /filter="randombar\(horizontal\)"/);
+  const rbV = one({ effect: "random-bars-out", dir: "vertical" });
+  assert.match(rbV, /presetID="14" presetClass="exit" presetSubtype="5"/);
+  assert.match(rbV, /transition="out" filter="randombar\(vertical\)"/);
+
+  // pulse: tmFilter fade dip + auto-reversed half-duration scale to 105%.
+  const pulse = one({ effect: "pulse", scale: 1.05, durationMs: 500 });
+  assert.match(pulse, /presetID="26" presetClass="emph"/);
+  assert.match(pulse, /<p:cBhvr tmFilter="0,0; \.2,\.5; \.8,\.5; 1,0">/);
+  assert.match(pulse, /<p:cTn id="\d+" dur="250" fill="hold" autoRev="1"\/>/);
+  assert.match(pulse, /<p:by x="105000" y="105000"\/>/);
+
+  // teeter: five rocks summing to zero, chained by per-behavior delays.
+  const teeter = one({ effect: "teeter", rotateDeg: 5, durationMs: 1000 });
+  assert.match(teeter, /presetID="32" presetClass="emph"/);
+  const rots = [...teeter.matchAll(/<p:animRot by="(-?\d+)">/g)].map((m) => Number(m[1]));
+  assert.deepEqual(rots, [300000, -600000, 600000, -600000, 300000]);
+  assert.equal(rots.reduce((a, b) => a + b, 0), 0);
+  const rockDelays = [...teeter.matchAll(/<p:animRot[^>]*><p:cBhvr><p:cTn id="\d+" dur="\d+" fill="hold"><p:stCondLst><p:cond delay="(\d+)"\/>/g)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(rockDelays, ["200", "400", "600", "800"]);
+});
+
+test("buildTimingXml: repeat and auto-reverse land on the effect cTn", () => {
+  const xml = buildTimingXml(
+    [anim([2], { effect: "spin", rotateDeg: 360, durationMs: 500, repeat: 3, autoReverse: true })],
+    1920,
+    1080,
+  );
+  assert.match(xml, /presetID="8" presetClass="emph" presetSubtype="0" repeatCount="3000" autoRev="1" fill="hold"/);
+});
+
+test("buildTimingXml: after-chain waits out the effective duration", () => {
+  const xml = buildTimingXml(
+    [
+      anim([2], { index: 0, effect: "spin", rotateDeg: 360, durationMs: 500, repeat: 3 }),
+      anim([3], { index: 1, trigger: "after" }),
+    ],
+    1920,
+    1080,
+  );
+  const starts = [...xml.matchAll(/<p:par><p:cTn id="\d+" fill="hold"><p:stCondLst><p:cond delay="(\d+)"\/><\/p:stCondLst><p:childTnLst><p:par><p:cTn id="\d+" presetID/g)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(starts, ["0", "1500"]);
+
+  // Auto-reverse doubles the wait too: 500 × 2 = 1000.
+  const rev = buildTimingXml(
+    [
+      anim([2], { index: 0, effect: "grow", scale: 1.5, durationMs: 500, autoReverse: true }),
+      anim([3], { index: 1, trigger: "after" }),
+    ],
+    1920,
+    1080,
+  );
+  const revStarts = [...rev.matchAll(/<p:cond delay="(\d+)"\/><\/p:stCondLst><p:childTnLst><p:par><p:cTn id="\d+" presetID/g)].map((m) => m[1]);
+  assert.deepEqual(revStarts, ["0", "1000"]);
+});
+
+// Every effect once (plus repeat/multi-shape variants): ids stay unique and
+// the assembled XML is tag-balanced — the two things that trip PowerPoint's
+// repair dialog.
+test("buildTimingXml: all-effects sweep — unique ids, balanced tags", () => {
+  const all: TimingAnim[] = (
+    [
+      { effect: "appear" },
+      { effect: "disappear" },
+      { effect: "fade-in" },
+      { effect: "fade-out" },
+      { effect: "fly-in", dir: "left" },
+      { effect: "fly-out", dir: "right" },
+      { effect: "wipe-in", dir: "top" },
+      { effect: "wipe-out", dir: "bottom" },
+      { effect: "float-in", dir: "bottom" },
+      { effect: "float-out", dir: "top" },
+      { effect: "split-in", dir: "vertical" },
+      { effect: "split-out", dir: "horizontal" },
+      { effect: "bounce-in" },
+      { effect: "bounce-out" },
+      { effect: "zoom-in" },
+      { effect: "zoom-out" },
+      { effect: "wheel-in" },
+      { effect: "wheel-out" },
+      { effect: "random-bars-in", dir: "horizontal" },
+      { effect: "random-bars-out", dir: "vertical" },
+      { effect: "spin", rotateDeg: -720, repeat: 2 },
+      { effect: "grow", scale: 2 },
+      { effect: "shrink", scale: 0.5, autoReverse: true },
+      { effect: "pulse", scale: 1.05 },
+      { effect: "teeter", rotateDeg: 5, repeat: 3, autoReverse: true },
+      { effect: "path", pathSegs: [{ c: "C", p: [1, 2, 3, 4, 5, 6] }] },
+    ] as Partial<AnimationDef>[]
+  ).map((over, i) =>
+    anim(i % 5 === 0 ? [i * 2 + 2, i * 2 + 3] : [i * 2 + 2], {
+      index: i,
+      trigger: i % 3 === 0 ? "click" : i % 3 === 1 ? "with" : "after",
+      ...over,
+    }),
+  );
+  const xml = buildTimingXml(all, 1920, 1080);
+
+  const ids = [...xml.matchAll(/<p:cTn id="(\d+)"/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, ids.length, "duplicate cTn ids");
+
+  // Tag-balance sweep. The tag regex only matches properly-quoted attributes,
+  // so stripping every match and asserting no angle bracket survives also
+  // catches malformed/unquoted tags.
+  const TAG = /<(\/?)([a-zA-Z:]+)((?:\s+[a-zA-Z:_-]+="[^"]*")*)\s*(\/?)>/g;
+  const stack: string[] = [];
+  for (const m of xml.matchAll(TAG)) {
+    const [, close, name, , selfClose] = m;
+    if (selfClose) continue;
+    if (close) assert.equal(stack.pop(), name, `mismatched </${name}>`);
+    else stack.push(name);
+  }
+  assert.deepEqual(stack, [], "unclosed tags");
+  const residue = xml.replace(TAG, "");
+  assert.ok(!/[<>]/.test(residue), `malformed tag near: ${residue.match(/.{0,40}[<>].{0,40}/)?.[0]}`);
+});

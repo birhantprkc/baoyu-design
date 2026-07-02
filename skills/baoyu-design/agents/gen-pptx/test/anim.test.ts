@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAnimAttrs, parseAnimPath, pathToOoxml } from "../src/core/anim.ts";
+import { effectiveDurationMs, parseAnimAttrs, parseAnimPath, pathToOoxml } from "../src/core/anim.ts";
 import type { AnimPathSeg } from "../src/types.ts";
 
 const attrs =
@@ -92,6 +92,118 @@ test("parseAnimAttrs: path requires data-anim-path", () => {
   const { def, warnings } = parseAnimAttrs(attrs({ "data-anim": "path" }), 0);
   assert.equal(def, null);
   assert.match(warnings[0], /requires data-anim-path/);
+});
+
+test("parseAnimAttrs: new-effect defaults", () => {
+  const cases: Array<[string, number, string | undefined]> = [
+    ["wipe-out", 500, "bottom"],
+    ["float-in", 1000, "bottom"],
+    ["float-out", 1000, "bottom"],
+    ["split-in", 500, "vertical"],
+    ["split-out", 500, "vertical"],
+    ["bounce-in", 2000, undefined],
+    ["bounce-out", 2000, undefined],
+    ["wheel-in", 2000, undefined],
+    ["wheel-out", 2000, undefined],
+    ["random-bars-in", 500, "horizontal"],
+    ["random-bars-out", 500, "horizontal"],
+    ["pulse", 500, undefined],
+    ["teeter", 1000, undefined],
+  ];
+  for (const [effect, dur, dir] of cases) {
+    const { def, warnings } = parseAnimAttrs(attrs({ "data-anim": effect }), 0);
+    assert.deepEqual(warnings, [], effect);
+    assert.equal(def?.durationMs, dur, effect);
+    assert.equal(def?.dir, dir, effect);
+  }
+  assert.equal(parseAnimAttrs(attrs({ "data-anim": "teeter" }), 0).def?.rotateDeg, 5);
+  assert.equal(parseAnimAttrs(attrs({ "data-anim": "pulse" }), 0).def?.scale, 1.05);
+});
+
+test("parseAnimAttrs: per-family data-anim-dir validation", () => {
+  // wipe-out takes all four edges like wipe-in.
+  for (const d of ["left", "right", "top", "bottom"]) {
+    const r = parseAnimAttrs(attrs({ "data-anim": "wipe-out", "data-anim-dir": d }), 0);
+    assert.equal(r.def?.dir, d);
+    assert.deepEqual(r.warnings, []);
+  }
+  // float is vertical-only: sides fall back with a family-specific warning.
+  const f = parseAnimAttrs(attrs({ "data-anim": "float-in", "data-anim-dir": "left" }), 0);
+  assert.equal(f.def?.dir, "bottom");
+  assert.match(f.warnings[0], /for "float-in" \(top\|bottom\)/);
+  // split takes axes, not edges.
+  const s = parseAnimAttrs(attrs({ "data-anim": "split-in", "data-anim-dir": "horizontal" }), 0);
+  assert.equal(s.def?.dir, "horizontal");
+  assert.deepEqual(s.warnings, []);
+  const bad = parseAnimAttrs(attrs({ "data-anim": "split-in", "data-anim-dir": "left" }), 0);
+  assert.equal(bad.def?.dir, "vertical");
+  assert.match(bad.warnings[0], /horizontal\|vertical/);
+  const rb = parseAnimAttrs(attrs({ "data-anim": "random-bars-in", "data-anim-dir": "vertical" }), 0);
+  assert.equal(rb.def?.dir, "vertical");
+  // dir still means nothing on non-directional effects.
+  const p = parseAnimAttrs(attrs({ "data-anim": "pulse", "data-anim-dir": "left" }), 0);
+  assert.match(p.warnings[0], /no effect/);
+});
+
+test("parseAnimAttrs: no-op pulse/teeter dropped like spin/grow", () => {
+  assert.equal(parseAnimAttrs(attrs({ "data-anim": "teeter", "data-anim-rotate": "0" }), 0).def, null);
+  assert.equal(parseAnimAttrs(attrs({ "data-anim": "pulse", "data-anim-scale": "1" }), 0).def, null);
+});
+
+test("parseAnimAttrs: data-anim-repeat matrix", () => {
+  const spin = (extra: Record<string, string>) =>
+    parseAnimAttrs(attrs({ "data-anim": "spin", ...extra }), 0);
+  assert.equal(spin({}).def?.repeat, undefined); // absent
+  assert.equal(spin({ "data-anim-repeat": "3" }).def?.repeat, 3);
+  assert.equal(spin({ "data-anim-repeat": "1" }).def?.repeat, undefined); // 1 = play once
+  assert.equal(spin({ "data-anim-repeat": "999" }).def?.repeat, 100); // clamped high, silent
+  const zero = spin({ "data-anim-repeat": "0" });
+  assert.equal(zero.def?.repeat, undefined);
+  assert.match(zero.warnings[0], /invalid data-anim-repeat/);
+  const junk = spin({ "data-anim-repeat": "x" });
+  assert.equal(junk.def?.repeat, undefined);
+  assert.equal(junk.warnings.length, 1);
+  // Instant effects can't meaningfully repeat.
+  const appear = parseAnimAttrs(attrs({ "data-anim": "appear", "data-anim-repeat": "3" }), 0);
+  assert.equal(appear.def?.repeat, undefined);
+  assert.match(appear.warnings[0], /ignored for "appear"/);
+  // Repeat is fine on entrances/exits (setVis lands on the final iteration).
+  assert.equal(
+    parseAnimAttrs(attrs({ "data-anim": "fade-in", "data-anim-repeat": "2" }), 0).def?.repeat,
+    2,
+  );
+});
+
+test("parseAnimAttrs: data-anim-auto-reverse matrix", () => {
+  const of = (effect: string, val: string | null) => {
+    const map: Record<string, string> = { "data-anim": effect };
+    if (effect === "path") map["data-anim-path"] = "L 100 0";
+    if (val !== null) map["data-anim-auto-reverse"] = val;
+    return parseAnimAttrs(attrs(map), 0);
+  };
+  // Bare attribute / "true" / "1" all switch it on for emphasis + path.
+  assert.equal(of("spin", "").def?.autoReverse, true);
+  assert.equal(of("teeter", "true").def?.autoReverse, true);
+  assert.equal(of("path", "1").def?.autoReverse, true);
+  // Off forms are silent no-ops.
+  assert.equal(of("spin", "false").def?.autoReverse, undefined);
+  assert.equal(of("spin", "0").warnings.length, 0);
+  // Entrances/exits reject it with a warning.
+  const fade = of("fade-in", "true");
+  assert.equal(fade.def?.autoReverse, undefined);
+  assert.match(fade.warnings[0], /only applies to emphasis and path/);
+  // Junk value warns.
+  assert.match(of("spin", "maybe").warnings[0], /invalid data-anim-auto-reverse/);
+});
+
+test("effectiveDurationMs counts repeats and the reverse leg", () => {
+  const base = parseAnimAttrs(attrs({ "data-anim": "fade-in" }), 0).def!;
+  assert.equal(effectiveDurationMs(base), 500);
+  const spun = parseAnimAttrs(
+    attrs({ "data-anim": "spin", "data-anim-duration": "500", "data-anim-repeat": "3", "data-anim-auto-reverse": "true" }),
+    0,
+  ).def!;
+  assert.equal(effectiveDurationMs(spun), 3000);
 });
 
 test("parseAnimPath: implicit M 0 0 and explicit M re-basing", () => {
